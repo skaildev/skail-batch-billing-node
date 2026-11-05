@@ -1,0 +1,37 @@
+# Build context: repository root (scripts/run.sh build). The skail bundle cannot read environment variables,
+# so the worker settings are fixed at build time (SKAIL_WORKLOAD, WEB_BASE_URL, CITY_HALL_*).
+ARG NODE_VERSION=22
+FROM docker.io/library/node:${NODE_VERSION}-slim AS build
+WORKDIR /app
+RUN npm install -g pnpm@10.34.7
+
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml tsconfig.base.json ./
+COPY apps/contracts/package.json ./apps/contracts/
+COPY apps/worker/package.json ./apps/worker/
+RUN pnpm install --frozen-lockfile --filter "@skail-batch-billing/worker..."
+
+COPY apps/contracts ./apps/contracts
+COPY apps/worker ./apps/worker
+ARG SKAIL_WORKLOAD
+ARG WEB_BASE_URL=http://batch-billing-web:8080
+ARG CITY_HALL_PROVIDER=simulated
+ARG CITY_HALL_OUTAGE_PERCENT=10
+ENV SKAIL_WORKLOAD=$SKAIL_WORKLOAD WEB_BASE_URL=$WEB_BASE_URL CITY_HALL_PROVIDER=$CITY_HALL_PROVIDER \
+    CITY_HALL_OUTAGE_PERCENT=$CITY_HALL_OUTAGE_PERCENT
+RUN test -n "$SKAIL_WORKLOAD" || (echo "build-arg SKAIL_WORKLOAD is required (name:version)" >&2; exit 1)
+RUN pnpm --filter "@skail-batch-billing/worker..." build
+
+FROM docker.io/library/node:${NODE_VERSION}-slim
+WORKDIR /app
+RUN npm install -g pnpm@10.34.7
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml tsconfig.base.json ./
+COPY apps/contracts/package.json ./apps/contracts/
+COPY apps/worker/package.json ./apps/worker/
+RUN pnpm install --frozen-lockfile --prod --filter "@skail-batch-billing/worker..."
+COPY --from=build /app/apps/contracts/dist ./apps/contracts/dist
+COPY --from=build /app/apps/worker/dist ./apps/worker/dist
+COPY --from=build /app/apps/worker/.skail ./apps/worker/.skail
+
+# SKAIL_WORKLOAD, SKAIL_NAMESPACE, SKAIL_KEY, SKAIL_SIDECAR arrive with --env-file .env at run time
+WORKDIR /app/apps/worker
+CMD ["node", "--enable-source-maps", "dist/main.js"]
